@@ -7,7 +7,7 @@ A fast and easy to use STUN and TURN server probe with structured output for hum
 ## Quick start
 
 ```bash
-# install (requires Go 1.21+)
+# install (requires Go 1.26.2+)
 go install github.com/AlchemillaHQ/traverse@latest
 
 # probe a STUN server
@@ -43,7 +43,7 @@ Grab a prebuilt binary from the [releases page](https://github.com/AlchemillaHQ/
 
 ```bash
 # Linux amd64 example
-curl -L -o traverse.tar.gz https://github.com/AlchemillaHQ/traverse/releases/download/v1.0.0/traverse_1.0.0_linux_amd64.tar.gz
+curl -L -o traverse.tar.gz https://github.com/AlchemillaHQ/traverse/releases/download/v1.0.1/traverse_1.0.1_linux_amd64.tar.gz
 tar xzf traverse.tar.gz
 ./traverse -h
 ```
@@ -89,7 +89,7 @@ traverse [options]
 | `--protocol` | `-P` | TURN transport (`udp` or `tcp`) | `udp` |
 | `--output` | `-o` | Output format (`text`, `json`, `xml`) | `text` |
 | `--batch` | `-b` | Combined JSON/XML batch report | - |
-| `--timeout` | `-T` | Request timeout in seconds | `5` |
+| `--timeout` | `-T` | Per-probe timeout in seconds, including DNS and connection setup | `5` |
 | `--local-ip` | `-l` | Bind to a specific local IP | - |
 | `--version` | `-v` | Print version and exit | - |
 | `--help` | `-h` | Show help | - |
@@ -140,7 +140,7 @@ Status:     SUCCESS
 Public IP:  203.0.113.42
 Public Port:49152
 Local IP:   10.0.0.5
-NAT Type:   symmetric
+NAT Type:   unknown
 ------------------------
 ```
 
@@ -153,7 +153,7 @@ NAT Type:   symmetric
   "duration": "5.5ms",
   "public_ip": "203.0.113.42",
   "public_port": 49152,
-  "nat_type": "symmetric",
+  "nat_type": "unknown",
   "local_ip": "10.0.0.5",
   "timestamp": "2026-06-13T18:07:10+05:30"
 }
@@ -168,7 +168,7 @@ NAT Type:   symmetric
   <duration>5.5ms</duration>
   <PublicIP>203.0.113.42</PublicIP>
   <PublicPort>49152</PublicPort>
-  <NATType>symmetric</NATType>
+  <NATType>unknown</NATType>
   <LocalIP>10.0.0.5</LocalIP>
   <timestamp>2026-06-13T18:07:10+05:30</timestamp>
 </STUNResult>
@@ -180,7 +180,7 @@ NAT Type:   symmetric
 {
   "generated_at": "2026-06-13T18:10:00+05:30",
   "stun_results": [
-    { "success": true, "server": "...", "public_ip": "203.0.113.42", "nat_type": "symmetric" }
+    { "success": true, "server": "...", "public_ip": "203.0.113.42", "nat_type": "unknown" }
   ],
   "turn_results": [
     { "success": true, "server": "...", "relayed_ip": "198.51.100.10", "protocol": "udp" }
@@ -201,15 +201,19 @@ NAT Type:   symmetric
 ### STUN (RFC 5389)
 
 - Sends a **Binding Request** to the server
+- Verifies the response transaction ID matches the request
 - Parses the **XOR-MAPPED-ADDRESS** from the response
 - Reports your public IP and port as seen by the server
-- Identifies NAT type (`open_internet`, `symmetric`, etc.)
+- Reports NAT type as `unknown`: a single binding response cannot distinguish
+  NAT mapping/filtering behavior or establish unrestricted internet connectivity
 
 ### TURN (RFC 5766)
 
 - Allocates a **relay address** on the TURN server using long-term credentials
-- Reports the allocated relay IP, port, and lifetime
-- Supports both UDP and TCP transports
+- Reports the allocated relay IP and port; lifetime is `unknown` because the
+  client library does not expose the negotiated lifetime
+- Supports both UDP and TCP **client-to-server transports** with UDP relay allocations
+- TURN endpoints currently require IPv4, matching the Pion v4 client implementation
 
 ## Public STUN servers
 

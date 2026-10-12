@@ -57,53 +57,64 @@ func (c *Client) Test(ctx context.Context) *Result {
 	}
 
 	start := time.Now()
+	defer func() { result.Duration = time.Since(start).String() }()
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 
-	serverAddr, err := net.ResolveUDPAddr("udp", c.serverAddr)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to resolve server address: %v", err)
-		result.Duration = time.Since(start).String()
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	fail := func(message string, err error) *Result {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		result.Error = fmt.Sprintf("%s: %v", message, err)
 		return result
 	}
 
-	var localAddr *net.UDPAddr
+	dialer := &net.Dialer{}
 	if c.localIP != "" {
-		localAddr = &net.UDPAddr{IP: net.ParseIP(c.localIP)}
+		ip := net.ParseIP(c.localIP)
+		if ip == nil {
+			result.Error = fmt.Sprintf("invalid local IP: %q", c.localIP)
+			return result
+		}
+		dialer.LocalAddr = &net.UDPAddr{IP: ip}
 	}
 
-	conn, err := net.DialUDP("udp", localAddr, serverAddr)
+	// DialContext also bounds DNS resolution, not just socket I/O.
+	conn, err := dialer.DialContext(ctx, "udp", c.serverAddr)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to dial UDP: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+		return fail("failed to dial UDP", err)
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
-	if err := conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
-		result.Error = fmt.Sprintf("failed to set deadline: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return fail("failed to set deadline", err)
 	}
 
 	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
 
 	if _, err := conn.Write(msg.Raw); err != nil {
-		result.Error = fmt.Sprintf("failed to send binding request: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+		return fail("failed to send binding request", err)
 	}
 
 	buf := make([]byte, 1500)
 	n, err := conn.Read(buf)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to read response: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+		return fail("failed to read response", err)
 	}
-	result.Duration = time.Since(start).String()
 
 	res := &stun.Message{Raw: buf[:n]}
 	if err := res.Decode(); err != nil {
-		result.Error = fmt.Sprintf("failed to decode response: %v", err)
+		return fail("failed to decode response", err)
+	}
+	if res.TransactionID != msg.TransactionID {
+		result.Error = "response transaction ID does not match the binding request"
 		return result
 	}
 
@@ -114,7 +125,10 @@ func (c *Client) Test(ctx context.Context) *Result {
 
 	var xorAddr stun.XORMappedAddress
 	if err := xorAddr.GetFrom(res); err != nil {
-		result.Error = fmt.Sprintf("failed to get XOR-MAPPED-ADDRESS: %v", err)
+		return fail("failed to get XOR-MAPPED-ADDRESS", err)
+	}
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
 		return result
 	}
 
@@ -130,41 +144,8 @@ func (c *Client) Test(ctx context.Context) *Result {
 	return result
 }
 
-func determineNATType(localIP, publicIP net.IP) NATType {
-
-	if localIP.Equal(publicIP) {
-		return NATTypeOpenInternet
-	}
-
-	if isPrivateIP(localIP) {
-
-		return NATTypeSymmetric
-	}
-
+func determineNATType(_, _ net.IP) NATType {
+	// A single binding response cannot determine mapping or filtering behavior,
+	// even when the local and mapped IP addresses are identical.
 	return NATTypeUnknown
-}
-
-func isPrivateIP(ip net.IP) bool {
-	if ip.IsLoopback() {
-		return true
-	}
-	if ip4 := ip.To4(); ip4 != nil {
-
-		if ip4[0] == 10 {
-			return true
-		}
-
-		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
-			return true
-		}
-
-		if ip4[0] == 192 && ip4[1] == 168 {
-			return true
-		}
-
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return true
-		}
-	}
-	return false
 }

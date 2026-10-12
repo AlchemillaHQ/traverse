@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/pion/stun/v3"
@@ -43,88 +44,64 @@ func NewClient(serverAddr, username, password, protocol string, timeout time.Dur
 		serverAddr: serverAddr,
 		username:   username,
 		password:   password,
-		protocol:   protocol,
+		protocol:   strings.ToLower(protocol),
 		timeout:    timeout,
 		localIP:    localIP,
 	}
 }
 
 func (c *Client) Test(ctx context.Context) *Result {
-	result := &Result{
-		Server:    c.serverAddr,
-		Protocol:  c.protocol,
-		Timestamp: time.Now(),
-	}
-
-	start := time.Now()
-
-	serverAddr, err := net.ResolveUDPAddr("udp", c.serverAddr)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to resolve server address: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-
-	var localAddr *net.UDPAddr
-	if c.localIP != "" {
-		localAddr = &net.UDPAddr{IP: net.ParseIP(c.localIP)}
-	}
-
-	conn, err := net.DialUDP("udp", localAddr, serverAddr)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to dial UDP: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
-		result.Error = fmt.Sprintf("failed to set deadline: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-
-	localAddrVal := conn.LocalAddr().(*net.UDPAddr)
-	result.LocalIP = localAddrVal.IP.String()
-
-	cfg := &turnclient.ClientConfig{
-		STUNServerAddr: c.serverAddr,
-		TURNServerAddr: c.serverAddr,
-		Conn:           conn,
-		Username:       c.username,
-		Password:       c.password,
-		Realm:          "",
-	}
-
-	tc, err := turnclient.NewClient(cfg)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to create TURN client: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-	defer tc.Close()
-
-	relayConn, err := tc.Allocate()
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to allocate relay address: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-	defer relayConn.Close()
-
-	relayAddr := relayConn.LocalAddr().(*net.UDPAddr)
-	result.RelayedIP = relayAddr.IP.String()
-	result.RelayedPort = relayAddr.Port
-
-	result.Lifetime = "600s (default)"
-
-	result.Success = true
-	result.Duration = time.Since(start).String()
-
-	return result
+	return c.test(ctx, false)
 }
 
+// TestConnectivity also sends a binding request through the relay. The TURN
+// endpoint must accept UDP STUN requests at the same address and port.
 func (c *Client) TestConnectivity(ctx context.Context) *Result {
+	return c.test(ctx, true)
+}
+
+// connect selects a real TCP transport or an unconnected UDP packet socket.
+// Pion v4 resolves TURN endpoints as udp4, including TCP control connections.
+func (c *Client) connect(ctx context.Context) (net.PacketConn, *net.UDPAddr, error) {
+	dialer := &net.Dialer{}
+	if c.localIP != "" {
+		ip := net.ParseIP(c.localIP)
+		if ip == nil || ip.To4() == nil {
+			return nil, nil, fmt.Errorf("TURN requires a valid IPv4 local IP, got %q", c.localIP)
+		}
+		if c.protocol == "tcp" {
+			dialer.LocalAddr = &net.TCPAddr{IP: ip}
+		} else {
+			dialer.LocalAddr = &net.UDPAddr{IP: ip}
+		}
+	}
+	if c.protocol != "udp" && c.protocol != "tcp" {
+		return nil, nil, fmt.Errorf("unsupported TURN protocol: %q", c.protocol)
+	}
+	conn, err := dialer.DialContext(ctx, c.protocol+"4", c.serverAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	if c.protocol == "tcp" {
+		remote := conn.RemoteAddr().(*net.TCPAddr)
+		return turnclient.NewSTUNConn(conn), &net.UDPAddr{IP: remote.IP, Port: remote.Port}, nil
+	}
+	// This temporary connected socket resolves the endpoint and selects a route
+	// without sending a packet. Bind a separate socket to the selected local IP:
+	// Pion needs WriteTo/ReadFrom, which cannot use a connected UDP socket.
+	remote := conn.RemoteAddr().(*net.UDPAddr)
+	local := conn.LocalAddr().(*net.UDPAddr)
+	bind := (&net.UDPAddr{IP: local.IP}).String()
+	conn.Close()
+	var listener net.ListenConfig
+	packet, err := listener.ListenPacket(ctx, "udp4", bind)
+	if err != nil {
+		return nil, nil, err
+	}
+	return packet, remote, nil
+}
+
+func (c *Client) test(ctx context.Context, connectivity bool) *Result {
 	result := &Result{
 		Server:    c.serverAddr,
 		Protocol:  c.protocol,
@@ -132,36 +109,40 @@ func (c *Client) TestConnectivity(ctx context.Context) *Result {
 	}
 
 	start := time.Now()
+	defer func() { result.Duration = time.Since(start).String() }()
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 
-	serverAddr, err := net.ResolveUDPAddr("udp", c.serverAddr)
-	if err != nil {
-		result.Error = fmt.Sprintf("resolve: %v", err)
-		result.Duration = time.Since(start).String()
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
 		return result
 	}
-
-	var localAddr *net.UDPAddr
-	if c.localIP != "" {
-		localAddr = &net.UDPAddr{IP: net.ParseIP(c.localIP)}
-	}
-
-	conn, err := net.DialUDP("udp", localAddr, serverAddr)
-	if err != nil {
-		result.Error = fmt.Sprintf("dial: %v", err)
-		result.Duration = time.Since(start).String()
+	fail := func(message string, err error) *Result {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		result.Error = fmt.Sprintf("%s: %v", message, err)
 		return result
+	}
+	if c.username == "" || c.password == "" {
+		result.Error = "TURN username and password are required"
+		return result
+	}
+	conn, serverAddr, err := c.connect(ctx)
+	if err != nil {
+		return fail("failed to connect to TURN server", err)
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
-		result.Error = fmt.Sprintf("deadline: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return fail("failed to set deadline", err)
 	}
+	result.LocalIP, _, _ = net.SplitHostPort(conn.LocalAddr().String())
 
 	cfg := &turnclient.ClientConfig{
-		STUNServerAddr: c.serverAddr,
-		TURNServerAddr: c.serverAddr,
+		STUNServerAddr: serverAddr.String(),
+		TURNServerAddr: serverAddr.String(),
 		Conn:           conn,
 		Username:       c.username,
 		Password:       c.password,
@@ -170,40 +151,68 @@ func (c *Client) TestConnectivity(ctx context.Context) *Result {
 
 	tc, err := turnclient.NewClient(cfg)
 	if err != nil {
-		result.Error = fmt.Sprintf("create client: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+		return fail("failed to create TURN client", err)
 	}
 	defer tc.Close()
+	// Closing the socket alone does not wake Pion's pending transactions.
+	stop := context.AfterFunc(ctx, func() {
+		conn.Close()
+		tc.Close()
+	})
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	if err := tc.Listen(); err != nil {
+		return fail("failed to listen for TURN responses", err)
+	}
 
 	relayConn, err := tc.Allocate()
 	if err != nil {
-		result.Error = fmt.Sprintf("allocate: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
+		return fail("failed to allocate relay address", err)
 	}
 	defer relayConn.Close()
 
 	relayAddr := relayConn.LocalAddr().(*net.UDPAddr)
 	result.RelayedIP = relayAddr.IP.String()
 	result.RelayedPort = relayAddr.Port
-	result.LocalIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
 
-	testMsg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	// Pion does not expose the negotiated allocation lifetime.
+	result.Lifetime = "unknown"
 
-	if err := tc.CreatePermission(&net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}); err != nil {
-
-		_ = err
+	if connectivity {
+		if err := relayConn.SetDeadline(deadline); err != nil {
+			return fail("failed to set relay deadline", err)
+		}
+		stopRelay := context.AfterFunc(ctx, func() { relayConn.SetReadDeadline(time.Now()) })
+		defer stopRelay()
+		if err := tc.CreatePermission(serverAddr); err != nil {
+			return fail("failed to create relay permission", err)
+		}
+		msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+		if _, err := relayConn.WriteTo(msg.Raw, serverAddr); err != nil {
+			return fail("failed to send relayed binding request", err)
+		}
+		buf := make([]byte, 1500)
+		n, peer, err := relayConn.ReadFrom(buf)
+		if err != nil {
+			return fail("failed to read relayed response", err)
+		}
+		res := &stun.Message{Raw: buf[:n]}
+		if err := res.Decode(); err != nil {
+			return fail("failed to decode relayed response", err)
+		}
+		if peer.String() != serverAddr.String() || res.Type != stun.BindingSuccess || res.TransactionID != msg.TransactionID {
+			result.Error = "relayed response does not match the binding request"
+			return result
+		}
 	}
-
-	if _, err := relayConn.WriteTo(testMsg.Raw, serverAddr); err != nil {
-		result.Error = fmt.Sprintf("relay send: %v", err)
-		result.Duration = time.Since(start).String()
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
 		return result
 	}
 
 	result.Success = true
-	result.Duration = time.Since(start).String()
-
 	return result
 }

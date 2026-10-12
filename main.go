@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -35,7 +37,11 @@ type config struct {
 }
 
 func main() {
-	cfg := parseFlags()
+	cfg, err := parseFlags(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\033[31m✗\033[0m %s\n\n", err)
+		os.Exit(1)
+	}
 
 	if cfg.showVersion {
 		fmt.Printf("traverse v%s  commit=%s  built=%s\n",
@@ -63,14 +69,11 @@ func main() {
 	}
 }
 
-func parseFlags() *config {
+func parseFlags(args []string) (*config, error) {
 	cfg := &config{}
 	fs := flag.NewFlagSet("traverse", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Usage = func() {
-		usage()
-		os.Exit(0)
-	}
+	// Report parse errors in main; only explicit help should print usage.
+	fs.SetOutput(io.Discard)
 
 	fs.StringVar(&cfg.stunServer, "stun-server", "", "")
 	fs.StringVar(&cfg.stunServer, "s", "", "")
@@ -105,17 +108,25 @@ func parseFlags() *config {
 	fs.BoolVar(&cfg.batch, "batch", false, "")
 	fs.BoolVar(&cfg.batch, "b", false, "")
 
-	fs.Parse(os.Args[1:])
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if fs.NArg() != 0 {
+		return nil, fmt.Errorf("unexpected argument: %q", fs.Arg(0))
+	}
 
 	cfg.stunServer = ensurePort(cfg.stunServer, "3478")
 	cfg.turnServer = ensurePort(cfg.turnServer, "3478")
 
-	return cfg
+	return cfg, nil
 }
 
 func ensurePort(addr, defaultPort string) string {
 	if addr == "" {
 		return addr
+	}
+	if net.ParseIP(addr) != nil {
+		return net.JoinHostPort(addr, defaultPort)
 	}
 
 	if strings.Contains(addr, "[") {
@@ -203,6 +214,9 @@ func (c *config) validate() error {
 
 	if c.timeout < 1 {
 		return fmt.Errorf("timeout must be at least 1 second")
+	}
+	if c.localIP != "" && net.ParseIP(c.localIP) == nil {
+		return fmt.Errorf("local IP must be a valid IP address, got %q", c.localIP)
 	}
 
 	return nil

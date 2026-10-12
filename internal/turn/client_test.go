@@ -8,44 +8,44 @@ import (
 
 func TestNewClient(t *testing.T) {
 	tests := []struct {
-		name		string
-		serverAddr	string
-		username	string
-		password	string
-		protocol	string
-		timeout		time.Duration
-		localIP		string
-		wantProto	string
+		name       string
+		serverAddr string
+		username   string
+		password   string
+		protocol   string
+		timeout    time.Duration
+		localIP    string
+		wantProto  string
 	}{
 		{
-			name:		"default protocol udp",
-			serverAddr:	"turn.example.com:3478",
-			username:	"user",
-			password:	"pass",
-			protocol:	"",
-			timeout:	0,
-			localIP:	"",
-			wantProto:	"udp",
+			name:       "default protocol udp",
+			serverAddr: "turn.example.com:3478",
+			username:   "user",
+			password:   "pass",
+			protocol:   "",
+			timeout:    0,
+			localIP:    "",
+			wantProto:  "udp",
 		},
 		{
-			name:		"custom protocol tcp",
-			serverAddr:	"turn.example.com:3478",
-			username:	"user",
-			password:	"pass",
-			protocol:	"tcp",
-			timeout:	10 * time.Second,
-			localIP:	"",
-			wantProto:	"tcp",
+			name:       "custom protocol tcp",
+			serverAddr: "turn.example.com:3478",
+			username:   "user",
+			password:   "pass",
+			protocol:   "tcp",
+			timeout:    10 * time.Second,
+			localIP:    "",
+			wantProto:  "tcp",
 		},
 		{
-			name:		"with local IP",
-			serverAddr:	"turn.example.com:3478",
-			username:	"user",
-			password:	"pass",
-			protocol:	"udp",
-			timeout:	5 * time.Second,
-			localIP:	"10.0.0.1",
-			wantProto:	"udp",
+			name:       "with local IP",
+			serverAddr: "turn.example.com:3478",
+			username:   "user",
+			password:   "pass",
+			protocol:   "udp",
+			timeout:    5 * time.Second,
+			localIP:    "10.0.0.1",
+			wantProto:  "udp",
 		},
 	}
 
@@ -76,15 +76,15 @@ func TestNewClient(t *testing.T) {
 
 func TestResultStruct(t *testing.T) {
 	r := &Result{
-		Success:	true,
-		Server:		"turn.example.com:3478",
-		Duration:	"250ms",
-		RelayedIP:	"203.0.113.10",
-		RelayedPort:	49152,
-		Lifetime:	"600s",
-		LocalIP:	"10.0.0.1",
-		Protocol:	"udp",
-		Timestamp:	time.Now(),
+		Success:     true,
+		Server:      "turn.example.com:3478",
+		Duration:    "250ms",
+		RelayedIP:   "203.0.113.10",
+		RelayedPort: 49152,
+		Lifetime:    "600s",
+		LocalIP:     "10.0.0.1",
+		Protocol:    "udp",
+		Timestamp:   time.Now(),
 	}
 
 	if !r.Success {
@@ -102,7 +102,7 @@ func TestResultStruct(t *testing.T) {
 }
 
 func TestTest_InvalidServer(t *testing.T) {
-	c := NewClient("invalid.turn.server.invalid:9999", "user", "pass", "udp", 1*time.Second, "")
+	c := NewClient("127.0.0.1:invalid-port", "user", "pass", "udp", 1*time.Second, "")
 	ctx := context.Background()
 	result := c.Test(ctx)
 
@@ -126,7 +126,7 @@ func TestTest_MissingCredentials(t *testing.T) {
 }
 
 func TestTestConnectivity_InvalidServer(t *testing.T) {
-	c := NewClient("invalid.server.test:1", "user", "pass", "udp", 1*time.Second, "")
+	c := NewClient("127.0.0.1:invalid-port", "user", "pass", "udp", 1*time.Second, "")
 	ctx := context.Background()
 	result := c.TestConnectivity(ctx)
 
